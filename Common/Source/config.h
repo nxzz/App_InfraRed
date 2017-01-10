@@ -67,7 +67,10 @@ extern "C" {
 #define PORT_CONF3 3
 
 #define PORT_BAUD 17
-
+#define PORT_INPUT_MASK ((1UL << PORT_INPUT1) | (1UL << PORT_INPUT2) | (1UL << PORT_INPUT3) | (1UL << PORT_INPUT4))
+#define PORT_IR_RECEIVE_MASK ((1UL << PORT_INPUT2) | (1UL << PORT_INPUT3))
+#define PORT_IR_RISING_MASK (1UL << PORT_INPUT3)
+#define PORT_IR_FALLING_MASK (1UL << PORT_INPUT2)
 /****************************************************************************/
 /***        Type Definitions                                              ***/
 /****************************************************************************/
