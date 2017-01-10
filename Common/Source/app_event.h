@@ -30,7 +30,7 @@ typedef enum
     E_EVENT_IR_TRIGGERED,
     E_EVENT_IR_TIMEOUT,
     E_EVENT_IR_FILLED,
-    E_EVENT_IR_STOP,
+    E_EVENT_IR_DUMP,
 	E_EVENT_IR_ABORT
 } teEventApp;
 
