@@ -98,11 +98,10 @@ static void vHandleSerialInput(void);
 
 static void vTransmit();
 
-static void vSetIrReading(bool_t bStart);
 static uint16 getWidth(uint16 primary, uint16 secondary);
 static void vDecodeIrCmd();
 static void vDumpIrCmds();
-static void vDumpEdgeTiming(uint16 count);
+static void vDumpEdgeTiming();
 
 /****************************************************************************/
 /***        Exported Variables                                            ***/
@@ -125,46 +124,48 @@ tsSerialPortSetup sSerPort;
 const uint32 u32DioPortWakeUp = 1UL << 7; // UART Rx Port
 
 #define IR_TIMER_PRESCALE (8)
+// prescaled timer clk in microsecond
 #define T_us (1<<(IR_TIMER_PRESCALE-4))
-#define LEADER_TIMEOUT_CLK (9400/T_us)
 // NEC_LEADER_us (9000)
 #define NEC_0_1_CLK (1688/T_us)
-#define NEC_REPEAT_CLK (3375/T_us)
-#define NEC_TIMEOUT_CLK (4900/T_us)
-// KADEN_LEADER_us (3200)
-#define KADEN_LEADER_MAX_CNT (3600/T_us)
-#define KADEN_0_1_CLK (1200/T_us)
-#define KADEN_TIMEOUT_CLK (2000/T_us)
+#define NEC_TIMEOUT_CLK (6000/T_us)
+// AEHA_LEADER_us (3200)
+#define AEHA_LEADER_MAX_CNT (3600/T_us)
+#define AEHA_0_1_CLK (1200/T_us)
+#define AEHA_TIMEOUT_CLK (4000/T_us)
 // SONY_LEADER_us (2400)
-#define SONY_LEADER_MIN_CNT (2000/T_us)
 #define SONY_LEADER_MAX_CNT (2800/T_us)
 #define SONY_0_1_CLK (1500/T_us)
 #define SONY_TIMEOUT_CLK (2200/T_us)
 #define TIMER_PERIOD (0x4000)
 
 #define MAX_PULSE_COUNT 1024
-static uint16 u16RisingEdge[MAX_PULSE_COUNT];
-static volatile uint16 u16RisingCount;
 static uint16 u16FallingEdge[MAX_PULSE_COUNT];
 static uint16 u16FallingCount;
+static uint16 u16RisingEdge[MAX_PULSE_COUNT];
+static uint16 u16RisingCount;
+static uint16 u16LastFallingCount;
+static uint16 u16LastRisingCount;
+static uint16 u16TimeoutClk = NEC_TIMEOUT_CLK;
 typedef enum {
 	E_IR_NEC = 1,
 	E_IR_NEC_REPEAT,
-	E_IR_KADEN,
-	E_IR_KADEN_REPEAT,
+	E_IR_AEHA,
+	E_IR_AEHA_REPEAT,
 	E_IR_SONY
 } teIrType;
+static char *u8TypeName[] = {"?", "NEC", "NEC(R)", "AEHA", "AEHA(R)", "SONY", ""};
 #define MAX_IR_CMDS 64
 typedef struct {
-	uint8 irtype;	// 1:NEC, 2:KADEN, 3:SONY
+	uint8 irtype;	// 1:NEC, 2:AEHA, 3:SONY
 	uint8 bits;
 	uint8 codes[10];
 } tsIrCmd;
 static tsIrCmd sIrCmds[MAX_IR_CMDS];
 static tsIrCmd *pIrCmd = sIrCmds;
 static uint16 u16IrCmdCount;
-static uint16 u16TimeoutCnt = NEC_TIMEOUT_CLK;
-static bool_t bReading = FALSE;
+static uint16 u16LastIrCmdCount;
+#define PRINT_WAIT 2048
 
 /****************************************************************************
  *
@@ -369,6 +370,7 @@ void cbToCoNet_vTxEvent(uint8 u8CbId, uint8 bStatus) {
  ****************************************************************************/
 void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
 {
+	static uint8 u8blank = 0;
 	switch (u32DeviceId) {
     case E_AHI_DEVICE_TICK_TIMER:
 		// LED BLINK
@@ -384,7 +386,14 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
 
     case E_AHI_DEVICE_TIMER3:
     	_C {
-			vDecodeIrCmd();
+			u8blank++;
+			if (u8blank == 1) {
+				vDecodeIrCmd();
+			} else if (u8blank == 100) {
+				vAHI_TimerStop(E_AHI_TIMER_3);
+				ToCoNet_Event_Process(E_EVENT_IR_TIMEOUT, 0, sAppData.prPrsEv);
+			}
+			vPortSetHi(PORT_OUT3);
     	}
     	break;
 
@@ -397,16 +406,18 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
 					uint16 leaderLength = getWidth(u16FallingEdge[0], u16RisingEdge[0]);
 					if (leaderLength < SONY_LEADER_MAX_CNT) {
 						pIrCmd->irtype = E_IR_SONY;
-						u16TimeoutCnt = SONY_TIMEOUT_CLK;
-					} else if (leaderLength < KADEN_LEADER_MAX_CNT) {
-						pIrCmd->irtype = E_IR_KADEN;
-						u16TimeoutCnt = KADEN_TIMEOUT_CLK;
+						u16TimeoutClk = SONY_TIMEOUT_CLK;
+					} else if (leaderLength < AEHA_LEADER_MAX_CNT) {
+						pIrCmd->irtype = E_IR_AEHA;
+						u16TimeoutClk = AEHA_TIMEOUT_CLK;
 					} else {
 						pIrCmd->irtype = E_IR_NEC;
-						u16TimeoutCnt = NEC_TIMEOUT_CLK;
+						u16TimeoutClk = NEC_TIMEOUT_CLK;
 					}
 				}
-				vAHI_TimerStartSingleShot(E_AHI_TIMER_3, 0, u16TimeoutCnt);
+				u8blank = 0;
+				vAHI_TimerStartRepeat(E_AHI_TIMER_3, 0, u16TimeoutClk);
+				vPortSetLo(PORT_OUT3);
 			}
 		}
 		break;
@@ -489,6 +500,8 @@ static void vInitHardware(int f_warm_start)
 	vPortDisablePullup(PORT_OUT3);
 	vPortDisablePullup(PORT_OUT4);
 	vPortAsInput(PORT_INPUT2);
+
+	vAHI_DioInterruptEdge(PORT_IR_RISING_MASK, PORT_IR_FALLING_MASK);
 
 	// Timer
 	vAHI_TimerEnable(E_AHI_TIMER_2, IR_TIMER_PRESCALE, FALSE, TRUE, FALSE);
@@ -624,8 +637,16 @@ static void vHandleSerialInput(void)
 			break;
 
 		case 'r':
+			// IRパルス幅、エッジ間隔のダンプ
 			_C {
 				ToCoNet_Event_Process(E_EVENT_IR_DUMP, 0, sAppData.prPrsEv);
+			}
+			break;
+
+		case 'i': case 'I':
+			// send last IR commands
+			_C {
+				ToCoNet_Event_Process(E_EVENT_IR_PLAYBACK, 0, sAppData.prPrsEv);
 			}
 			break;
 
@@ -674,45 +695,24 @@ static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg) {
 				vfPrintf(&sSerStream, "\r\n*** ToCoNet App_InfraRed %d.%02d-%d ***", VERSION_MAIN, VERSION_SUB, VERSION_VAR);
 				vfPrintf(&sSerStream, "\r\n*** %08x ***", ToCoNet_u32GetSerial());
 			}
-			ToCoNet_Event_SetState(pEv, E_STATE_IR_READING);
+			vAHI_TimerStartRepeat(E_AHI_TIMER_2, 0, TIMER_PERIOD);
+			// Set interrupt
+			vAHI_DioInterruptEnable(PORT_IR_RECEIVE_MASK, 0);
+			memset (&sIrCmds, 0x00, sizeof(sIrCmds));
+			ToCoNet_Event_SetState(pEv, E_STATE_RUNNING);
 		}
 		break;
 
 	case E_STATE_RUNNING:
-		if (eEvent == E_EVENT_IR_START) {
-			vPortSetHi(PORT_OUT2);
-			memset (&sIrCmds, 0x00, sizeof(sIrCmds));
-			u16RisingCount = 0;
-			u16FallingCount = 0;
-			vAHI_TimerStartRepeat(E_AHI_TIMER_2, 0, TIMER_PERIOD);
-			ToCoNet_Event_SetState(pEv, E_STATE_IR_READING);
-		}
-		break;
-
-	case E_STATE_IR_READING:
 		if (eEvent == E_EVENT_NEW_STATE) {
-			vPortSetHi(PORT_OUT2);
-			memset (&sIrCmds, 0x00, sizeof(sIrCmds));
 			u16RisingCount = 0;
 			u16FallingCount = 0;
-			vAHI_TimerStartRepeat(E_AHI_TIMER_2, 0, TIMER_PERIOD);
-			vfPrintf(&sSerStream, "* Start IR reading.\r\n");
-			vSetIrReading(TRUE);
 		} else if (eEvent == E_EVENT_IR_DUMP) {
-			ToCoNet_Event_SetState(pEv, E_STATE_IR_FINISHED);
+			vDumpEdgeTiming();
 		} else if (eEvent == E_EVENT_IR_TIMEOUT) {
 			vDumpIrCmds();
-		}
-		break;
-
-	case E_STATE_IR_FINISHED:
-		if (eEvent == E_EVENT_NEW_STATE) {
-			vSetIrReading(FALSE);
-			vPortSetHi(PORT_OUT2);
-			vfPrintf(&sSerStream, "* Stop IR reading.\r\n");
-			vDecodeIrCmd();
-			vDumpIrCmds();
-			ToCoNet_Event_SetState(pEv, E_STATE_IR_READING);
+		} else if (eEvent == E_EVENT_IR_PLAYBACK) {
+			// not implemented yet
 		}
 		break;
 
@@ -764,22 +764,6 @@ static void vTransmit() {
 	}
 }
 
-/**
- * Start/Stop Infra-Red signal reading.
- * @param start
- */
-static void vSetIrReading(bool_t bStart) {
-	if (bStart) {
-		// Set interrupt
-		vAHI_DioInterruptEdge(PORT_IR_RISING_MASK, PORT_IR_FALLING_MASK);
-		vAHI_DioInterruptEnable(PORT_IR_RECEIVE_MASK, 0);
-	} else {
-		vAHI_DioInterruptEnable(0, 0);
-		vAHI_TimerStop(E_AHI_TIMER_2);
-		vAHI_TimerStop(E_AHI_TIMER_3);
-	}
-}
-
 static uint16 getWidth(uint16 primary, uint16 secondary) {
 	if (secondary < primary) {
 		secondary += TIMER_PERIOD;
@@ -789,18 +773,26 @@ static uint16 getWidth(uint16 primary, uint16 secondary) {
 
 static void vDecodeIrCmd() {
 	if (u16RisingCount < 2 || (u16RisingCount != u16FallingCount)) {
+		u16LastFallingCount = u16FallingCount;
+		u16LastRisingCount = u16RisingCount;
 		u16FallingCount = u16RisingCount = 0;
+		vfPrintf(&sSerStream, ".");
+		return;
+	}
+	if (u16IrCmdCount == MAX_IR_CMDS) {
 		return;
 	}
 	tsIrCmd *pCmd = &sIrCmds[u16IrCmdCount];
-	memset (&pCmd->codes, 0x00, sizeof(pCmd->codes));
 	uint16 u16threshold = NEC_0_1_CLK;
+	uint16 offset = 1;
 	switch (pCmd->irtype) {
 	case E_IR_NEC:
 		u16threshold = NEC_0_1_CLK;
+		offset = 2;
 		break;
-	case E_IR_KADEN:
-		u16threshold = KADEN_0_1_CLK;
+	case E_IR_AEHA:
+		u16threshold = AEHA_0_1_CLK;
+		offset = 2;
 		break;
 	case E_IR_SONY:
 		u16threshold = SONY_0_1_CLK;
@@ -808,15 +800,24 @@ static void vDecodeIrCmd() {
 	default:
 		break;
 	}
+	memset (&pCmd->codes, 0x00, sizeof(pCmd->codes));
 	uint8 i;
-	for (i = 1; i < u16RisingCount; i++) {
+	for (i = offset; i < u16RisingCount; i++) {
+		uint8 bit = (i - offset);
 		uint16 edgeSpan = getWidth(u16RisingEdge[i - 1], u16RisingEdge[i]);
 		if (edgeSpan > u16threshold) {
-			pCmd->codes[i/8] |= (0x80>>(i&0x7));
+			pCmd->codes[bit/8] |= (0x80>>(bit&0x7));
 		}
 	}
-	pCmd->bits = u16RisingCount - 1;
+	pCmd->bits = u16RisingCount - offset;
+	if (pCmd->irtype == E_IR_NEC && pCmd->bits == 0) {
+		pCmd->irtype = E_IR_NEC_REPEAT;
+	} else if (pCmd->irtype == E_IR_AEHA && pCmd->bits == 0) {
+		pCmd->irtype = E_IR_AEHA_REPEAT;
+	}
 	u16IrCmdCount++;
+	u16LastFallingCount = u16FallingCount;
+	u16LastRisingCount = u16RisingCount;
 	u16FallingCount = u16RisingCount = 0;
 	vfPrintf(&sSerStream, " %d", u16IrCmdCount);
 }
@@ -828,44 +829,41 @@ static void vDumpIrCmds() {
 		vfPrintf(&sSerStream, LB"cnt=%d", u16IrCmdCount);
 		for (i = 0; i < u16IrCmdCount; i++) {
 			pCmd = &sIrCmds[i];
-			vfPrintf(&sSerStream, LB"type:%d, bits:%d,", pCmd->irtype, pCmd->bits);
-			vWait(4096);
+			vfPrintf(&sSerStream, LB"type:%-6s, bits:%d,", u8TypeName[pCmd->irtype], pCmd->bits);
+			vWait(PRINT_WAIT);
 			uint8 c;
-			for (c = 0; c <= (pCmd->bits) / 8; c++) {
+			uint8 bytes = (pCmd->bits) / 8 + ((pCmd->bits % 8) == 0 ? 0 : 1);
+			for (c = 0; c < bytes; c++) {
 				vfPrintf(&sSerStream, " %02x", pCmd->codes[c]);
-				vWait(4096);
+				vWait(PRINT_WAIT);
 			}
 		}
-		uint16 count = pCmd->bits + 1;
-		if (pCmd->irtype != E_IR_SONY) {
-			count++;
-		}
-		vDumpEdgeTiming(count);
+		u16LastIrCmdCount = u16IrCmdCount;
 		u16IrCmdCount = 0;
+		vfPrintf(&sSerStream, LB);
 	}
 }
 
-static void vDumpEdgeTiming(uint16 count) {
-	u16IrCmdCount = 0;
+static void vDumpEdgeTiming() {
 	uint16 i;
 	uint16 width;
-	vfPrintf(&sSerStream, LB"%d Pulse T=%dus"LB, count, T_us);
-	for (i = 0; i < count; i++) {
+	vfPrintf(&sSerStream, LB"%d Pulse T=%dus"LB, u16LastRisingCount, T_us);
+	for (i = 0; i < u16LastRisingCount; i++) {
 		width = getWidth(u16FallingEdge[i], u16RisingEdge[i]);
-		vfPrintf(&sSerStream, " %d(%d)", width, T_us*width);
-		vWait(4096);
+		vfPrintf(&sSerStream, " %d", T_us*width);
+		vWait(PRINT_WAIT);
 	}
 	vfPrintf(&sSerStream, LB"Falling"LB);
-	for (i = 1; i < count; i++) {
+	for (i = 1; i < u16LastFallingCount; i++) {
 		width = getWidth(u16FallingEdge[i - 1], u16FallingEdge[i]);
-		vfPrintf(&sSerStream, " %d(%d)", width, T_us*width);
-		vWait(4096);
+		vfPrintf(&sSerStream, " %d", T_us*width);
+		vWait(PRINT_WAIT);
 	}
 	vfPrintf(&sSerStream, LB"Rising"LB);
-	for (i = 1; i < count; i++) {
+	for (i = 1; i < u16LastRisingCount; i++) {
 		width = getWidth(u16RisingEdge[i - 1], u16RisingEdge[i]);
-		vfPrintf(&sSerStream, " %d(%d)", width, T_us*width);
-		vWait(4096);
+		vfPrintf(&sSerStream, " %d", T_us*width);
+		vWait(PRINT_WAIT);
 	}
 	vfPrintf(&sSerStream, LB);
 }
