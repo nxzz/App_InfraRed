@@ -393,7 +393,7 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
 				vAHI_TimerStop(E_AHI_TIMER_3);
 				ToCoNet_Event_Process(E_EVENT_IR_TIMEOUT, 0, sAppData.prPrsEv);
 			}
-			vPortSetHi(PORT_OUT3);
+			vPortSetHi(PORT_OUT4);
     	}
     	break;
 
@@ -417,7 +417,7 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
 				}
 				u8blank = 0;
 				vAHI_TimerStartRepeat(E_AHI_TIMER_3, 0, u16TimeoutClk);
-				vPortSetLo(PORT_OUT3);
+				vPortSetLo(PORT_OUT4);
 			}
 		}
 		break;
@@ -495,6 +495,7 @@ static void vInitHardware(int f_warm_start)
 	vPortSetHi(PORT_OUT1);
 	vPortSetHi(PORT_OUT2);
 	vPortSetHi(PORT_OUT3);
+	vPortSetHi(PORT_OUT4);
 	vPortDisablePullup(PORT_OUT1);
 	vPortDisablePullup(PORT_OUT2);
 	vPortDisablePullup(PORT_OUT3);
