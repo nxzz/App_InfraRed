@@ -532,6 +532,7 @@ static void vInitHardware(int f_warm_start)
 	vPortSetLo(DIO12);
 	vPortDisablePullup(DIO12);
 //	vAHI_TimerSetLocation(E_AHI_TIMER_1, TRUE, TRUE);
+	vAHI_InfraredRegisterCallback(cbToCoNet_vHwEvent);
 }
 
 /****************************************************************************
@@ -747,9 +748,10 @@ static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg) {
 
 	case E_STATE_IR_REPLAY:
 		if (eEvent == E_EVENT_NEW_STATE) {
-			vAHI_InfraredRegisterCallback(cbToCoNet_vHwEvent);
+			vPortSetLo(PORT_OUT4);
 			sendLastIrCmd();
 		} else if (eEvent == E_EVENT_IR_PLAYBACK_FINISHED) {
+			vPortSetHi(PORT_OUT4);
 			vAHI_InfraredDisable();
 			vfPrintf(&sSerStream, "IR Transmit"LB);
 			ToCoNet_Event_SetState(pEv, E_STATE_RUNNING);
