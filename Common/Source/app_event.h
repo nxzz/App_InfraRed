@@ -28,13 +28,15 @@ typedef enum
     E_EVENT_TICK_A,
     E_EVENT_IR_TIMEOUT,
     E_EVENT_IR_DUMP,
-	E_EVENT_IR_PLAYBACK
+	E_EVENT_IR_PLAYBACK,
+	E_EVENT_IR_PLAYBACK_FINISHED
 } teEventApp;
 
 // STATE MACHINE
 typedef enum
 {
 	E_STATE_APP_BASE = ToCoNet_STATE_APP_BASE,
+	E_STATE_IR_REPLAY
 } teStateApp;
 
 #endif /* EVENT_H_ */

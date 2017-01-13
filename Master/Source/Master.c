@@ -84,6 +84,20 @@ typedef struct
 	void *prPrsEv; //!< vProcessEvCoreSlpまたはvProcessEvCorePwrなどの処理部へのポインタ
 } tsAppData;
 
+typedef enum {
+	E_IR_UNKNOWN = 0,
+	E_IR_NEC,
+	E_IR_NEC_REPEAT,
+	E_IR_AEHA,
+	E_IR_AEHA_REPEAT,
+	E_IR_SONY
+} teIrType;
+
+typedef struct {
+	uint8 irtype;	// 1:NEC, 2:AEHA, 3:SONY
+	uint8 bits;
+	uint8 codes[10];
+} tsIrCmd;
 
 /****************************************************************************/
 /***        Local Function Prototypes                                     ***/
@@ -98,6 +112,9 @@ static void vHandleSerialInput(void);
 
 static void vTransmit();
 
+static void vSetLearnMode(bool mode);
+static void sendLastIrCmd();
+static void vSendIrCmd(tsIrCmd *pCmd);
 static uint16 getWidth(uint16 primary, uint16 secondary);
 static void vDecodeIrCmd();
 static void vDumpIrCmds();
@@ -134,9 +151,14 @@ const uint32 u32DioPortWakeUp = 1UL << 7; // UART Rx Port
 #define AEHA_0_1_CLK (1200/T_us)
 #define AEHA_TIMEOUT_CLK (4000/T_us)
 // SONY_LEADER_us (2400)
+#define SONY_LEADER_MIN_CNT (2000/T_us)
 #define SONY_LEADER_MAX_CNT (2800/T_us)
 #define SONY_0_1_CLK (1500/T_us)
 #define SONY_TIMEOUT_CLK (2200/T_us)
+// UNKNOWN
+#define UNKNOWN_0_1_CLK AEHA_0_1_CLK
+#define UNKNOWN_TIMEOUT_CLK AEHA_TIMEOUT_CLK
+
 #define TIMER_PERIOD (0x4000)
 
 #define MAX_PULSE_COUNT 1024
@@ -147,25 +169,15 @@ static uint16 u16RisingCount;
 static uint16 u16LastFallingCount;
 static uint16 u16LastRisingCount;
 static uint16 u16TimeoutClk = NEC_TIMEOUT_CLK;
-typedef enum {
-	E_IR_NEC = 1,
-	E_IR_NEC_REPEAT,
-	E_IR_AEHA,
-	E_IR_AEHA_REPEAT,
-	E_IR_SONY
-} teIrType;
-static char *u8TypeName[] = {"?", "NEC", "NEC(R)", "AEHA", "AEHA(R)", "SONY", ""};
+static char *u8TypeName[] = {"UNKNOWN", "NEC", "NEC(R)", "AEHA", "AEHA(R)", "SONY", ""};
 #define MAX_IR_CMDS 64
-typedef struct {
-	uint8 irtype;	// 1:NEC, 2:AEHA, 3:SONY
-	uint8 bits;
-	uint8 codes[10];
-} tsIrCmd;
 static tsIrCmd sIrCmds[MAX_IR_CMDS];
-static tsIrCmd *pIrCmd = sIrCmds;
+static tsIrCmd *pIrCmdPtr = sIrCmds;
+static tsIrCmd *pIrCmdTail = sIrCmds;
 static uint16 u16IrCmdCount;
 static uint16 u16LastIrCmdCount;
-#define PRINT_WAIT 2048
+static uint32 u32IrBitBuffer[10];
+#define PRINT_WAIT 3072
 
 /****************************************************************************
  *
@@ -402,16 +414,19 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
 			if (u32ItemBitmap & PORT_IR_RISING_MASK) {
 				if (u16RisingCount == 1) {
 					// determine IR type by leader pulse length
-					pIrCmd = &sIrCmds[u16IrCmdCount];
+					tsIrCmd *pCmd = &sIrCmds[u16IrCmdCount];
 					uint16 leaderLength = getWidth(u16FallingEdge[0], u16RisingEdge[0]);
-					if (leaderLength < SONY_LEADER_MAX_CNT) {
-						pIrCmd->irtype = E_IR_SONY;
+					if (leaderLength < SONY_LEADER_MIN_CNT) {
+						pCmd->irtype = E_IR_UNKNOWN;
+						u16TimeoutClk = UNKNOWN_TIMEOUT_CLK;
+					} else if (leaderLength < SONY_LEADER_MAX_CNT) {
+						pCmd->irtype = E_IR_SONY;
 						u16TimeoutClk = SONY_TIMEOUT_CLK;
 					} else if (leaderLength < AEHA_LEADER_MAX_CNT) {
-						pIrCmd->irtype = E_IR_AEHA;
+						pCmd->irtype = E_IR_AEHA;
 						u16TimeoutClk = AEHA_TIMEOUT_CLK;
 					} else {
-						pIrCmd->irtype = E_IR_NEC;
+						pCmd->irtype = E_IR_NEC;
 						u16TimeoutClk = NEC_TIMEOUT_CLK;
 					}
 				}
@@ -421,6 +436,14 @@ void cbToCoNet_vHwEvent(uint32 u32DeviceId, uint32 u32ItemBitmap)
 			}
 		}
 		break;
+
+    case E_AHI_DEVICE_INFRARED:
+    	if (pIrCmdPtr < pIrCmdTail) {
+    		vSendIrCmd(pIrCmdPtr++);
+    	} else {
+    		ToCoNet_Event_Process(E_EVENT_IR_PLAYBACK_FINISHED, 0, sAppData.prPrsEv);
+    	}
+    	break;
 
     default:
     	break;
@@ -501,12 +524,14 @@ static void vInitHardware(int f_warm_start)
 	vPortDisablePullup(PORT_OUT3);
 	vPortDisablePullup(PORT_OUT4);
 	vPortAsInput(PORT_INPUT2);
+	vPortAsInput(PORT_INPUT3);
 
 	vAHI_DioInterruptEdge(PORT_IR_RISING_MASK, PORT_IR_FALLING_MASK);
 
-	// Timer
-	vAHI_TimerEnable(E_AHI_TIMER_2, IR_TIMER_PRESCALE, FALSE, TRUE, FALSE);
-	vAHI_TimerEnable(E_AHI_TIMER_3, IR_TIMER_PRESCALE, FALSE, TRUE, FALSE);
+	vPortAsOutput(DIO12);
+	vPortSetLo(DIO12);
+	vPortDisablePullup(DIO12);
+//	vAHI_TimerSetLocation(E_AHI_TIMER_1, TRUE, TRUE);
 }
 
 /****************************************************************************
@@ -637,15 +662,15 @@ static void vHandleSerialInput(void)
 			}
 			break;
 
-		case 'r':
-			// IRパルス幅、エッジ間隔のダンプ
+		case 'l': case 'L':
+			// 学習したIRパルス幅、エッジ間隔のダンプ
 			_C {
 				ToCoNet_Event_Process(E_EVENT_IR_DUMP, 0, sAppData.prPrsEv);
 			}
 			break;
 
-		case 'i': case 'I':
-			// send last IR commands
+		case 'r': case 'R':
+			// replay IR commands
 			_C {
 				ToCoNet_Event_Process(E_EVENT_IR_PLAYBACK, 0, sAppData.prPrsEv);
 			}
@@ -696,9 +721,6 @@ static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg) {
 				vfPrintf(&sSerStream, "\r\n*** ToCoNet App_InfraRed %d.%02d-%d ***", VERSION_MAIN, VERSION_SUB, VERSION_VAR);
 				vfPrintf(&sSerStream, "\r\n*** %08x ***", ToCoNet_u32GetSerial());
 			}
-			vAHI_TimerStartRepeat(E_AHI_TIMER_2, 0, TIMER_PERIOD);
-			// Set interrupt
-			vAHI_DioInterruptEnable(PORT_IR_RECEIVE_MASK, 0);
 			memset (&sIrCmds, 0x00, sizeof(sIrCmds));
 			ToCoNet_Event_SetState(pEv, E_STATE_RUNNING);
 		}
@@ -706,6 +728,7 @@ static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg) {
 
 	case E_STATE_RUNNING:
 		if (eEvent == E_EVENT_NEW_STATE) {
+			vSetLearnMode(TRUE);
 			u16RisingCount = 0;
 			u16FallingCount = 0;
 		} else if (eEvent == E_EVENT_IR_DUMP) {
@@ -713,7 +736,23 @@ static void vProcessEvCore(tsEvent *pEv, teEvent eEvent, uint32 u32evarg) {
 		} else if (eEvent == E_EVENT_IR_TIMEOUT) {
 			vDumpIrCmds();
 		} else if (eEvent == E_EVENT_IR_PLAYBACK) {
-			// not implemented yet
+			if (u16LastIrCmdCount > 0) {
+				vSetLearnMode(FALSE);
+				u16IrCmdCount = u16LastIrCmdCount;
+				vDumpIrCmds();
+				ToCoNet_Event_SetState(pEv, E_STATE_IR_REPLAY);
+			}
+		}
+		break;
+
+	case E_STATE_IR_REPLAY:
+		if (eEvent == E_EVENT_NEW_STATE) {
+			vAHI_InfraredRegisterCallback(cbToCoNet_vHwEvent);
+			sendLastIrCmd();
+		} else if (eEvent == E_EVENT_IR_PLAYBACK_FINISHED) {
+			vAHI_InfraredDisable();
+			vfPrintf(&sSerStream, "IR Transmit"LB);
+			ToCoNet_Event_SetState(pEv, E_STATE_RUNNING);
 		}
 		break;
 
@@ -765,6 +804,134 @@ static void vTransmit() {
 	}
 }
 
+static void vSetLearnMode(bool mode) {
+	if (mode) {
+		// Timer
+		vAHI_TimerEnable(E_AHI_TIMER_2, IR_TIMER_PRESCALE, FALSE, TRUE, FALSE);
+		vAHI_TimerEnable(E_AHI_TIMER_3, IR_TIMER_PRESCALE, FALSE, TRUE, FALSE);
+		vAHI_TimerStartRepeat(E_AHI_TIMER_2, 0, TIMER_PERIOD);
+		// Set interrupt
+		vAHI_DioInterruptEnable(PORT_IR_RECEIVE_MASK, 0);
+	} else {
+		vAHI_DioInterruptEnable(0, 0);
+		vAHI_TimerDisable(E_AHI_TIMER_2);
+		vAHI_TimerDisable(E_AHI_TIMER_3);
+	}
+}
+
+static uint16 encodeAEHA(tsIrCmd *pCmd) {
+	bAHI_InfraredEnable(0, 281, 421, 16, FALSE, TRUE);
+	u32IrBitBuffer[0] = 0xff000000;
+	uint16 bufBit = 8 + 4;
+	// set bits
+	uint16 cmdBit;
+	for (cmdBit = 0; cmdBit < pCmd->bits; cmdBit++) {
+		uint8 codeIdx = cmdBit / 8;
+		uint8 codeMask = (1<< (cmdBit % 8));
+		u32IrBitBuffer[bufBit / 32] |= (0x80000000 >> (bufBit % 32));
+		if (pCmd->codes[codeIdx] & codeMask) {
+			bufBit += 4;
+		} else {
+			bufBit += 2;
+		}
+	}
+	// stop bit
+	u32IrBitBuffer[bufBit / 32] |= (0x80000000 >> (bufBit % 32));
+
+	return 235;
+}
+
+static uint16 encodeNEC(tsIrCmd *pCmd) {
+	bAHI_InfraredEnable(0, 281, 421, 21, FALSE, TRUE);
+	u32IrBitBuffer[0] = 0xffff0000;
+	uint16 bufBit = 16 + 8;
+	// set bits
+	uint16 cmdBit;
+	for (cmdBit = 0; cmdBit < pCmd->bits; cmdBit++) {
+		uint8 codeIdx = cmdBit / 8;
+		uint8 codeMask = (1<< (cmdBit % 8));
+		u32IrBitBuffer[bufBit / 32] |= (0x80000000 >> (bufBit % 32));
+		if (pCmd->codes[codeIdx] & codeMask) {
+			bufBit += 4;
+		} else {
+			bufBit += 2;
+		}
+	}
+	// stop bit
+	u32IrBitBuffer[bufBit / 32] |= (0x80000000 >> (bufBit % 32));
+
+	return 192;
+}
+
+static uint16 encodeNECrepeat(tsIrCmd *pCmd) {
+	bAHI_InfraredEnable(0, 281, 421, 21, FALSE, TRUE);
+	u32IrBitBuffer[0] = 0xffff0800;
+	return 192;
+}
+
+static uint16 encodeAEHArepeat(tsIrCmd *pCmd) {
+	bAHI_InfraredEnable(0, 281, 421, 16, FALSE, TRUE);
+	u32IrBitBuffer[0] = 0xff008000;
+	return 235;
+}
+
+static uint16 encodeSONY(tsIrCmd *pCmd) {
+	bAHI_InfraredEnable(0, 267, 400, 24, FALSE, TRUE);
+	u32IrBitBuffer[0] = 0xf0000000;
+	uint16 bufBit = 4;
+	// set bits
+	uint16 cmdBit;
+	for (cmdBit = 0; cmdBit < pCmd->bits; cmdBit++) {
+		uint8 codeIdx = cmdBit / 8;
+		uint8 codeMask = (1<< (cmdBit % 8));
+		bufBit++;	// bit delimiter
+		u32IrBitBuffer[bufBit / 32] |= (0x80000000 >> (bufBit % 32));
+		bufBit++;
+		if (pCmd->codes[codeIdx] & codeMask) {
+			u32IrBitBuffer[bufBit / 32] |= (0x80000000 >> (bufBit % 32));
+			bufBit++;
+		}
+	}
+
+	return 75;
+}
+
+static void vSendIrCmd(tsIrCmd *pCmd) {
+	memset(u32IrBitBuffer, 0, sizeof(u32IrBitBuffer));
+	uint16 bufBit = 0;
+	// set format and leader
+	switch (pCmd->irtype) {
+	case E_IR_NEC:
+		bufBit = encodeNEC(pCmd);
+		break;
+	case E_IR_NEC_REPEAT:
+		bufBit = encodeNECrepeat(pCmd);
+		break;
+	case E_IR_AEHA:
+		bufBit = encodeAEHA(pCmd);
+		break;
+	case E_IR_AEHA_REPEAT:
+		bufBit = encodeAEHArepeat(pCmd);
+		break;
+	case E_IR_SONY:
+		bufBit = encodeSONY(pCmd);
+		break;
+	default:
+		break;
+	}
+	if (!bAHI_InfraredStart(u32IrBitBuffer, bufBit)) {
+		ToCoNet_Event_Process(E_EVENT_IR_PLAYBACK_FINISHED, 0, sAppData.prPrsEv);
+	}
+}
+
+static void sendLastIrCmd() {
+	if (0 < u16LastIrCmdCount) {
+		pIrCmdPtr = sIrCmds;
+		pIrCmdTail = &sIrCmds[u16LastIrCmdCount];
+		vSendIrCmd(pIrCmdPtr++);
+	}
+}
+
 static uint16 getWidth(uint16 primary, uint16 secondary) {
 	if (secondary < primary) {
 		secondary += TIMER_PERIOD;
@@ -801,13 +968,13 @@ static void vDecodeIrCmd() {
 	default:
 		break;
 	}
-	memset (&pCmd->codes, 0x00, sizeof(pCmd->codes));
+	memset(&pCmd->codes, 0x00, sizeof(pCmd->codes));
 	uint8 i;
 	for (i = offset; i < u16RisingCount; i++) {
 		uint8 bit = (i - offset);
 		uint16 edgeSpan = getWidth(u16RisingEdge[i - 1], u16RisingEdge[i]);
 		if (edgeSpan > u16threshold) {
-			pCmd->codes[bit/8] |= (0x80>>(bit&0x7));
+			pCmd->codes[bit/8] |= (1<<(bit&0x7));
 		}
 	}
 	pCmd->bits = u16RisingCount - offset;

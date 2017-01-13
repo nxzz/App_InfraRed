@@ -56,6 +56,7 @@ extern "C" {
 #define PORT_OUT2 19
 #define PORT_OUT3 4
 #define PORT_OUT4 9
+#define DIO12 12
 
 #define PORT_INPUT1 12
 #define PORT_INPUT2 13
