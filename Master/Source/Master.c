@@ -921,6 +921,15 @@ static void vSendIrCmd(tsIrCmd *pCmd) {
 	default:
 		break;
 	}
+#if 0
+	int n;
+	vfPrintf(&sSerStream, " %d bits"LB, bufBit);
+	for (n = 0; n < (bufBit + 31) /32; n++) {
+		vfPrintf(&sSerStream, " %032b"LB, u32IrBitBuffer[n]);
+		vWait(PRINT_WAIT);
+		vWait(PRINT_WAIT);
+	}
+#endif
 	if (!bAHI_InfraredStart(u32IrBitBuffer, bufBit)) {
 		ToCoNet_Event_Process(E_EVENT_IR_PLAYBACK_FINISHED, 0, sAppData.prPrsEv);
 	}
