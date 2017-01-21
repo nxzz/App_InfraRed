@@ -528,10 +528,14 @@ static void vInitHardware(int f_warm_start)
 
 	vAHI_DioInterruptEdge(PORT_IR_RISING_MASK, PORT_IR_FALLING_MASK);
 
-	vPortAsOutput(DIO12);
-	vPortSetLo(DIO12);
-	vPortDisablePullup(DIO12);
-//	vAHI_TimerSetLocation(E_AHI_TIMER_1, TRUE, TRUE);
+	vPortAsOutput(PORT_PWM2);
+	vPortDisablePullup(PORT_PWM2);
+#ifdef PWM_RELOCATE
+	vAHI_TimerSetLocation(E_AHI_TIMER_1, TRUE, TRUE);
+	vPortSetHi(PORT_PWM2);
+#else
+	vPortSetLo(PORT_PWM2);
+#endif
 	vAHI_InfraredRegisterCallback(cbToCoNet_vHwEvent);
 }
 
@@ -822,7 +826,7 @@ static void vSetLearnMode(bool mode) {
 }
 
 static uint16 encodeAEHA(tsIrCmd *pCmd) {
-	bAHI_InfraredEnable(0, 281, 421, 16, FALSE, TRUE);
+	bAHI_InfraredEnable(0, 281, 421, 16, PWM2_POLARITY, TRUE);
 	u32IrBitBuffer[0] = 0xff000000;
 	uint16 bufBit = 8 + 4;
 	// set bits
@@ -844,7 +848,7 @@ static uint16 encodeAEHA(tsIrCmd *pCmd) {
 }
 
 static uint16 encodeNEC(tsIrCmd *pCmd) {
-	bAHI_InfraredEnable(0, 281, 421, 21, FALSE, TRUE);
+	bAHI_InfraredEnable(0, 281, 421, 21, PWM2_POLARITY, TRUE);
 	u32IrBitBuffer[0] = 0xffff0000;
 	uint16 bufBit = 16 + 8;
 	// set bits
@@ -866,19 +870,19 @@ static uint16 encodeNEC(tsIrCmd *pCmd) {
 }
 
 static uint16 encodeNECrepeat(tsIrCmd *pCmd) {
-	bAHI_InfraredEnable(0, 281, 421, 21, FALSE, TRUE);
+	bAHI_InfraredEnable(0, 281, 421, 21, PWM2_POLARITY, TRUE);
 	u32IrBitBuffer[0] = 0xffff0800;
 	return 192;
 }
 
 static uint16 encodeAEHArepeat(tsIrCmd *pCmd) {
-	bAHI_InfraredEnable(0, 281, 421, 16, FALSE, TRUE);
+	bAHI_InfraredEnable(0, 281, 421, 16, PWM2_POLARITY, TRUE);
 	u32IrBitBuffer[0] = 0xff008000;
 	return 235;
 }
 
 static uint16 encodeSONY(tsIrCmd *pCmd) {
-	bAHI_InfraredEnable(0, 267, 400, 24, FALSE, TRUE);
+	bAHI_InfraredEnable(0, 267, 400, 24, PWM2_POLARITY, TRUE);
 	u32IrBitBuffer[0] = 0xf0000000;
 	uint16 bufBit = 4;
 	// set bits

@@ -51,12 +51,20 @@ extern "C" {
 // 666kbps mode to save transmit energy
 #define HIGH_DATARATE 0 // undef:250kbps, 1:500kbps, 2:667kbps
 
+#define PWM_RELOCATE
+
+#ifdef PWM_RELOCATE
+#define PORT_PWM2 6
+#define PWM2_POLARITY TRUE
+#else
+#define PORT_PWM2 12
+#define PWM2_POLARITY FALSE
+#endif
 // TWE-Lite DIP (TWELITE の標準構成)
 #define PORT_OUT1 18
 #define PORT_OUT2 19
 #define PORT_OUT3 4
 #define PORT_OUT4 9
-#define DIO12 12
 
 #define PORT_INPUT1 12
 #define PORT_INPUT2 13
